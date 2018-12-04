@@ -1,0 +1,1324 @@
+---
+title: "R demonstration"
+author: "Wolfgang Scherrer and Manfred Deistler"
+date: "December 4, 2018"
+output:
+  pdf_document:
+    fig_crop: no
+    fig_height: 4.047345
+    fig_width: 5.39646
+    keep_tex: yes
+    number_sections: yes
+    toc: yes
+  html_document:
+    df_print: paged
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, collapse = TRUE, prompt = TRUE, comment = NA, highlight = FALSE)
+options(width = 65)
+```
+
+```{r}
+```
+
+
+
+# Introduction
+
+This document is intended as a short guide to the modeling of multivariate time series 
+with VARMA models or state space models. We mainly use two packages: 
+
+* the MTS package, which is kind of companion toolbox for the text book 
+  Tsay (2014), Multivariate Time Series Analysis, John Wiley & Sons.
+* and the dse package by Paul Gilbert, see e.g. Gilbert, P., 2015. 
+  Brief User’s Guide: Dynamic Systems Estimation. 
+  http://cran.r-project.org/web/packages/dse/vignettes/Guide.pdf.
+
+We only discuss and use some parts of these packages. Both of them 
+include many more models and methods, e.g. the MTS package also supports 
+multivariate volatility models, factor models and error-correction VAR
+models for co-integrated time series.
+
+Some utilities (in particular tools to convert MTS/dse objects) are collected 
+in `tools.R`
+A short description/manual of these tools may be found at the end of this document.
+
+This code is not thoroughly tested and thus should be used with some care. 
+In particular there are almost no input checks, so be sure to use correctly 
+specified parameters. Please feel free to use this code and to change the 
+code according to your own needs and preferences.
+
+Often we use a syntax like `MTS::function` or `dse::function` 
+in order to make clear which package is used. 
+
+# VARMA Models
+
+We consider vector autoregressive moving average (VARMA) models of the form 
+$$
+a_0 y_t = a_1 y_{t-1} + \cdots + a_p y_{t-p} + 
+          b_0 \epsilon_t + b_1 \epsilon_{t-1} + \cdots + b_q \epsilon_{t-q}
+$$
+where $(\epsilon_t\,|\,t\in\mathbb{Z})$ is $n$-dimensional white noise with variance 
+$\Sigma=\mathbb{E}\epsilon_t\epsilon_t'=I\in\mathbb{R}^{n\times n}$ and $a_j, b_j\in\mathbb{R}^{n\times n}$ are 
+parameter matrices. It is assumed that  $a_0=b_0$ is non singular and we most often consider the case[^a0] $a_0=b_0=I\in \mathbb{R}^{n\times n}$. 
+
+[^a0]: Of course we can easily reparametrize the model ($a_j\rightarrow a_0^{-1}a_j$ 
+and $b_j\rightarrow a_0^{-1}b_j$) in order to satisfy the normalization constraint 
+$a_0=b_0=I$.
+
+The AR/MA polynomials associated with this model are 
+$$
+\begin{array}{rcl}
+a(z) &=& a_0 - a_1z-\cdots - a_pz^p\\
+b(z) &=& b_0 + b_1z + \cdots + b_qz^q
+\end{array}
+$$
+
+## `MTS` implementation and tools 
+
+First load the `MTS` library and construct an example VARMA(2,2) model. Note that Tsay 
+uses a different notation, 
+
+$$
+\phi_0 y_t = \phi_1 y_{t-1} + \cdots + \phi_p y_{t-p} + 
+          \phi_0 \epsilon_t - \theta_1 \epsilon_{t-1} - \cdots - \theta_q \epsilon_{t-q}
+$$
+The AR and MA coefficients are collected in two matrices 
+$\phi=(\phi_1,\ldots,\phi_p)\in\mathbb{R}^{n\times np}$ and 
+$\theta=(\theta_1,\ldots,\theta_q)\in\mathbb{R}^{n\times nq}$:
+```{r}
+library(MTS)        # load package 
+source('tools.R')   # load utility functions
+
+phi0 = matrix(c( 1.0,   0, 0, 
+                -1.199, 1, 0, 
+                -0.638, 0, 1), byrow = TRUE, nrow= 3)
+phi = matrix(c(0.762, 0,     0,    -0.074, 0.137,-0.313,
+              -0.142,-0.470, 0.543, 0,     0,     0, 
+               0.920,-0.775, 0.064, 0,     0,     0), 
+             byrow = TRUE, nrow= 3, ncol=6)
+theta = matrix(c( 0.694,-0.116,-0.150,-0.216, 0.269,-0.231,
+                 -0.540,-0.253, 0.708, 0,     0,     0,
+                  0.748,-0.760, 0.242, 0,     0,     0), 
+               byrow = TRUE, nrow= 3, ncol=6)
+sigma = matrix(c(0.815, 0.154, 0.411, 
+                 0.154, 0.716, 0.202, 
+                 0.411, 0.202, 0.813), nrow=3)
+```
+
+```{r}
+phi0
+phi
+theta
+sigma 
+```
+
+If the stability condition 
+$$
+\det a(z) \neq 0 \quad \forall |z|\leq 1
+$$
+holds, then the unique stationary solution of the above VARMA system has a causal 
+MA($\infty$) representation
+$$
+y_t = \sum_{j\geq 0} k_j \epsilon_{t-j}
+$$
+The sequence $(k_j\in\mathbb{R}^{n\times n}\,|\, j\geq 0)$ is called the 
+*impulse response function* of the VARMA system. Note that $k_0=I$ since $a_0=b_0$. 
+If $\Sigma=HH'$, i.e. if $\bar{\epsilon}_t = H^{-1}\epsilon_t$ has a unit variance, 
+then $(\bar{k}_j=k_jH\,|\, j\geq 0)$ is a so called *orthogonalized 
+impulse response function*. 
+
+The (orthogonalized) impulse response function may be computed with the 
+function `VARMAirf`. Note that `VARMAirf` assumes $\phi_0=I$ ($a_0=I$) 
+and hence we reparametrize the model by $\phi \rightarrow \phi_0^{-1}\phi$ 
+and $\theta \rightarrow \phi_0^{-1}\theta$. 
+
+The function `VARMAirf` returns a list with components `psi` and `irf`. The 
+component `psi` is the matrix $(k_0,k_1,\ldots,k_l)\in\mathbb{R}^{n\times n(l+1)}$. 
+The component `irf` is the matrix[^vec] 
+$(\mbox{vec}(\bar{k}_0),\mbox{vec}(\bar{k}_1),\ldots,\mbox{vec}(\bar{k}_l))\in\mathbb{R}^{n^2\times (l+1)}$, i.e. `irf` contains the desired orthogonalized impulse response coefficients. Note that the `MTS` package here uses two different methods to represent a $3$-dimensional array by a ($2$-dimensional) matrix!
+
+[^vec]: $\mbox{vec}$ denotes the vectorization operator, i.e. $\mbox{vec}(X)$ is the  $mn$-dimensional column vector obtained by stacking the columns of the $(m,n)$-dimensional matrix $X$. 
+
+`VARMAirf` uses the symmetric square root of $\Sigma$ (computed via an eigenvalue decomposition of $\Sigma$) and hence the lag zero coefficient $\bar{k}_0=k_0 H=H=H'$ is symmetric. 
+
+`VARMAirf` always produces two plots (one for the (orthogonalized) impulse response function and one for the cumulative (orthogonalized) impulse response function). In order to be somewhat more flexible we have implemented a simple function (`plot3d`) for plotting $3$-dimensional arrays like the impulse response function or the autocovariance function. The $(i,j)$-th panel plots the respective $(i,j)$-component of $\bar{k}_l$ as a function of the lag $l=0,1,2\ldots$ and hence shows influence of the $j$-th "orthogonalized shock" $\bar{\epsilon}_{jt}$ on the $i$-th component $y_{i,t+l}$. 
+
+```{r VARMAirf}
+k = MTS::VARMAirf(Phi = solve(phi0,phi), 
+                  Theta = solve(phi0, theta), 
+                  Sigma = sigma, lag = 12, orth = TRUE)
+
+plot3d(k$irf, dim = c(3,3,13), 
+    main='orthogonalized impulse response function', 
+    labels.ij="partialdiff*y[i_*k]/partialdiff*epsilon[j_*0]",
+    type='o', lty='solid', col='brown4', pch=19, cex=0.5)
+```
+
+
+The autocovariance function
+$$
+\gamma_j = \mathbb{E}y_{t+j} y_t' = \sum_{l\geq 0} k_{j+l}\Sigma k_j' \quad j\geq 0
+$$
+of the VARMA process $(y_t)$ may be easily computed with the function `ARMAcov`. This function returns a list with components `autocov` and `ccm`, where `autocov` stores the autocovariances, i.e. the matrix 
+$(\gamma_0,\gamma_1,\ldots,\gamma_l)\in\mathbb{R}^{n\times n(l+1)}$ and the 
+$(n\times n(l+1))$  matrix `ccm` contains the autocorrelations[^diag] 
+$\rho_j = \mbox{diag}(\gamma_0)^{-1/2} \gamma_j \mbox{diag}(\gamma_0)^{-1/2}$, 
+$j=0,1,\ldots,l$.
+
+[^diag]: Here $\mbox{diag}(\gamma_0)^{-1/2}$ denotes the diagonal matrix with diagonal elements $(\gamma_{0,ii})^{-1/2}$, i.e. the reciprocals of the standard deviations of the components $y_{it}$.  
+
+To be precise `VARMAcov` computes an approximation of the autocovariance function by the finite sum $\sum_{l=0}^{m} k_{j+l}\Sigma k_j'$, where the number $m$ of lags used corresponds to the optional parameter `trun`. 
+
+Note that `VARMAcov` always prints the computed autocovariances and autocorrelations (called cross correlation matrices) and hence here we suppress the output of the next `R` block.
+
+```{r VARMAcov, results='hide'}
+g = MTS::VARMAcov(Phi = solve(phi0,phi), 
+                  Theta = solve(phi0,theta), 
+                  Sigma = sigma, lag = 12)
+
+plot3d(g$ccm, dim = c(3,3,13), 
+       main = 'auto correlation function', 
+       labels.ij = "corr(list(y[i_*k],y[j_*0]))",
+       type = 'h', col = 'blue4', lwd = 5, lend = 1)
+```
+
+If in addition the miniphase assumption 
+$$
+\det b(z) \neq 0 \quad \forall |z| < 1
+$$
+holds, then the $\epsilon_t$'s are the *innovations* of the process $(y_t)$ and the above MA($\infty$) representation is the Wold representation 
+of the process.  The variance of the $h$-step ahead prediction errors from the infinite past then is given by 
+$$
+\Sigma_h = \mathbb{E}(y_{t+h}-\hat{y}_{t,h})(y_{t+h}-\hat{y}_{t,h})' = \sum_{l=0}^{h-1} k_l \Sigma k_l' = \sum_{l=0}^{h-1} \bar{k}_l \bar{k}_l'
+$$
+For the variance of the $i$-th component of the forecast errors we obtain 
+$$
+\mathbb{E}(y_{i,t+h}-\hat{y}_{i,t,h})^2 = \sum_{l=0}^{h-1} \sum_{j=1}^{n} \bar{k}_{l,ij}^2 = \sum_{j=1}^{n} \sigma^h_{ij} 
+\quad \mbox{ where } \sigma^h_{ij} = \sum_{l=0}^{h-1} \bar{k}_{l,ij}^2.
+$$
+and hence the ratio
+$$
+c^h_{ij} = \frac{\sigma^h_{ij}}{\sum_{m=1}^n \sigma^h_{im}}
+$$
+is the fraction of the forecast error variance of the $i$-th component due to the $j$-th component of the (orthogonalized) shocks 
+$\bar{\epsilon}_t$. This is the so called *forecast error variance decomposition* which may be computed by the utility function `fevd`. 
+This function takes as a main argument an arbitrary orthogonal impulse response function (e.g. computed by `ARMAirf`) 
+and returns a list with two components. The first element `vd` is an $(n,n,h_{\max})$-dimensional array where the $(i,j,h)$-th entry is equal to $c^h_{ij}$ and the second element `v` is an $(n,h_{\max})$-dimensional matrix where the $(i,h)$-th element is the variance of the 
+$i$-th component of the $h$-step ahead forecast error, i.e. $\sum_{m=1}^n \sigma_{im}^h$. 
+The maximum forecast horizon $h_{\max}$ is determined by the length of the input. 
+
+A plot[^names] of this decomposition may be obtained by `plotfevd`. 
+
+[^names]: The choice for the `series.names` will become clear later on.
+
+It seems that the `MTS` function `FEVdec` has a bug. Furthermore the orthogonalization scheme is "hardwired" 
+(a Cholesky decomposition of $\Sigma$). Therefore we have implemented an own version.
+
+```{r FEVD}
+out = fevd(k$irf, dim = c(3,3,13))
+plotfevd(out$vd, 
+    series.names = c('consumption','investment','income'))
+```
+
+The stability and the miniphase assumptions may be checked with the utility function `is.stable`. In the next subsection we will also discuss how to check these assumption with `dse` package tools.
+
+```{r check.stability}
+#check stability assumption
+is.stable(solve(phi0,phi))
+#check miniphase assumption
+is.stable(solve(phi0,theta))
+```
+
+The VARMA model, i.e. the degrees $p,q$ and the parameters $a_j,b_j$, are not unique for a given (VARMA) process $(y_t)$ without additional restrictions. However, note that (due to the stability and miniphase assumption) the causal MA($\infty$) representation is the Wold representation of the process and hence is unique. This means that the impulse response coefficients $(k_j\,|\,j\geq 0)$ are unique. One possibility to get a unique (identifiable) representation is to use the *echelon canonical form*. The construction of this canonical form is based on the Hankel matrix of the impulse response coefficients
+$$
+H = \begin{pmatrix} 
+k_1 & k_2 & k_3 & \cdots \\
+k_2 & k_3 & k_4 & \cdots \\
+k_3 & k_4 & k_5 & \cdots \\
+\vdots & \vdots & \vdots & 
+\end{pmatrix}.
+$$
+For VARMA models this matrix has a finite rank. The so called *Kronecker indices* $(\nu_1,\nu_2,\ldots,\nu_n)$ describe a basis for the row space 
+of $H$. The rows with indices 
+$$
+j \in \bigcup_{\begin{smallmatrix}1\leq i\leq n \\ \nu_i>0 \end{smallmatrix}} \{i, n+i, \ldots, n(\nu_i-1)+i\}
+$$
+form a basis for the row space of $H$.  Clearly the rank of $H$ is equal to the sum of the Kronecker indices ($\mbox{rk}(H)=\sum_{i=1}^n \nu_i$). The echelon canonical form restricts certain elements of the AR/MA parameter matrices to zero or one. The position and the number of these restriction depends on the corresponding Kronecker indices. 
+
+The utility function `impresp2PhiTheta` computes for a given impulse response the Kronecker indices and the corresponding VARMA model in echelon canonical form. The computations are based on a finite sub matrix $H_{f,p}$ of the infinite dimensional Hankel matrix with $f$ block rows and $p$ block columns. The numbers $f,p$ are determined from the length of the input sequence. The core computation is to determine a basis for the row space. This is done via a QR decomposition of the transpose $H_{f,p}'$ with the R function `qr`. The output of `impresp2PhiTheta` is a list with components `Phi`, `Theta`,  `Phi0` (these matrices contain the AR/MA parameters), `kidx` (the vector of Kronecker indices), `Hrank` (the (computed) rank of the Hankel matrix $H$) and `Hpivot` (as returned by `qr()`). Note that the first `Hrank` elements of the vector `Hpivot` contain the indices of the basis rows of $H_{f,p}$. 
+
+The function `MTS::Kronspec` determines the zero/one restrictions imposed by the echelon canonical for given Kronecker indices (`kdx`) and prints a nice representation of these restrictions (for `output = TRUE`). 
+
+```{r echelon}
+out = impresp2PhiTheta(k$psi)
+out$kidx  # Kronecker indices
+# display the corresponding AR/MA restrictions
+junk = MTS::Kronspec(out$kidx) 
+
+all.equal(cbind(out$Phi0, out$Phi, out$Theta),
+          cbind(phi0,     phi,     theta))
+```
+
+The Kronecker indices are $(2,1,1)$ and hence the rank of the Hankel matrix is $2+1+1=4$ and the rows $1,2,3,4$ (i.e. the first 4 rows) of $H$ form a basis. The number of "free parameters" is `r sum(cbind(junk$PhiID, junk$ThetaID[,-(1:3)])==2)`. The last statement of the above `R` code shows that the VARMA model, we have started with, is in Echelon canonical form. 
+
+## `dse` implementation and tools
+
+The package `dse` uses an object oriented approach (with the S3 class system) and implements object classes for models, data sets and estimated models. VARMA models[^sign]
+
+[^sign]: The `dse` package uses yet another convention for the sign of the AR/MA parameters!
+
+
+$$
+a_0 y_t + a_1 y_{t-1} + \cdots + a_p y_{t-p} = b_0 \epsilon_t + b_1 \epsilon_{t-1} + \cdots + b_q \epsilon_{t-q} 
+$$
+are represented by `ARMA` objects (which are special `TSmodel` objects). Note that the `ARMA` model class may represent more general models, in particular models with exogenous inputs (i.e. VARMAX models) and models with a trend component. In addition note that $a_0$ and $b_0$ may be different. However, here we will stick to the simple model above and assume that $a_0=b_0=I$. 
+
+The AR parameters $a_j\in \mathbb{R}^{n\times n}$ are stored in the $(p+1,n,n)$-dimensional array `A`, where the $i$-th slot `A[i,,]` corresponds to the matrix $a_{i-1}\in \mathbb{R}^{n\times n}$. Analogously the MA parameters $b_j$  are stored in the $(q+1,n,n)$-dimensional array `B`.
+
+In order to be able to easily switch between `MTS` and `dse` models and tools we have implemented two utility functions `PhiTheta2ARMA` and 
+`ARMA2PhiTheta`. 
+
+Load the `dse` library and convert the above VARMA model to an `dse::ARMA` object. In addition we check that we can reconstruct the 
+`Theta`, `Phi` parameters:  
+```{r}
+library(dse)
+
+arma = PhiTheta2ARMA(Phi = phi, Theta = theta, Phi0 = phi0, 
+       output.names = c('consumption','investment','income'))
+arma
+
+junk = ARMA2PhiTheta(arma, normalizePhi0 = FALSE)
+all.equal(cbind(phi, theta, phi0),
+          cbind(junk$Phi, junk$Theta, junk$Phi0))
+```
+
+The stability and the miniphase assumption now may be checked with the function `polyrootDet(a))` which computes the roots of the determinant of a polynomial matrix $a(z) = a_0 + a_1 z +\cdots + a_p z^p$ with coefficients which are stored in the 3-dimensional array `a`. 
+
+```{r}
+# check the stability assumption 
+min(abs(polyrootDet(arma$A)))>1
+# check the (strict) miniphase assumption 
+min(abs(polyrootDet(arma$B)))>1
+```
+The `dse` package contains a number of useful utilities for polynomial matrices (e.g. `characteristicPoly`, `companionMatrix`, `polydet`, ...). 
+
+# State Space Models
+
+State space models are an alternative way to describe processes with a rational spectral density. We consider models of the form 
+$$
+\begin{array}{rcl}
+x_{t+1} &=& A x_t + B \epsilon_t \\ 
+y_t &=& C x_t + \epsilon_t
+\end{array}
+$$
+where $(\epsilon_t)$ is $n$-dimensional white noise with a variance $\Sigma =\mathbb{E}\epsilon_t \epsilon_t '$, $x_t$ is an observed 
+$s$-dimensional random vector called state and $A\in\mathbb{R}^{s\times s}$,  $B\in\mathbb{R}^{s\times n}$ and  $C\in\mathbb{R}^{n\times s}$ are 
+parameter matrices. We always impose the stability assumption
+$$
+\lambda_{\max} (A) <1
+$$
+and the miniphase assumption
+$$
+\lambda_{\max} (A-BC) \leq 1.
+$$
+Here $\lambda_{\max}(X)$ denotes the spectral radius of $X$, i.e. the maximum of the moduli of the eigenvalues of $X$. Given these assumption there exists a unique stationary solution $(y_t)$ and this solution is of the form 
+$$
+y_t = \sum_{j\geq 0} k_j \epsilon_{t-j}
+$$
+Furthermore the $\epsilon_t$'s are the innovations of the process $(y_t )$ and the above MA representation is the Wold representation of the process. Therefore one says that the above state model is in *innovation form*. 
+
+State space models are implemented as `SS` objects in `dse`. However, `dse` uses a different naming convention, i.e. $A \rightarrow F$, 
+$B \rightarrow K$  and $C \rightarrow H$. The `dse` package also handles state space models which are not in innovation form. 
+To convert the above VARMA model to a state space model (in innovation form), we may use the function[^toSS] `toSS`. The function `is.innovSS` checks whether the input is an "innovation form state space" object.
+
+[^toSS]: Note that the function `toSS` does not work for ARMA($p,q$) models with $q>p$!
+
+```{r}
+ss = dse::toSS(arma)
+ss
+dse::is.innov.SS(ss)
+```
+We here get a model with a state space dimension $s=6$. 
+
+The impulse response function and the autocovariance function of a process described by a state state space model in innovation form my be easily computed as follows:
+$$
+\begin{array}{rcll}
+k_0 &=& I \\
+k_j &=& C A^{j-1} B & \mbox{ for } j>0
+\end{array}
+$$
+The variance of the state $x_t$ is the solution of a so called Lyapunov equation 
+$$
+P = \mathbb{E} x_t x_t' = APA' + B\Sigma B'
+$$
+The autocovariance function then is 
+$$
+\begin{array}{rcll}
+\gamma_0 = \mathbb{E} y_t y_t' &=& C P C' + \Sigma  \\
+\gamma_j = \mathbb{E} y_{t+j} y_t' &=& C A^{j-1} (APC' + B\Sigma) & \mbox{ for } j>0
+\end{array}
+$$
+
+The utility function `SSirf` and `SScov` implement the above scheme to compute  the impulse response and autocovariance function. The outputs returned by these function have the same structure as the output of the corresponding `MTS` function, e.g. `SScov` returns a list with components `autocov` and `ccm` where both of them are matrices of dimension $(n,n(l+1))$. To compute the state variance $P$ here the function[^lyap] `lyap` is used. 
+
+[^lyap]: Alternatively one may use the function `dse::Riccati`. However for the model we use here for testing purposes the (non iterative version) of `Riccati` stops with an error message. The function `lyap` first computes a Schur decomposition of the state transition matrix $A$ (respectively $F$). To this end the `QZ` package has to be installed!
+
+The following code computes the impulse response function and the ACF of the state space model. Of course, since this state space model and the VARMA model above describe the same process the output must be identical to the output we have computed above.
+```{r}
+k.ss = SSirf(ss, Sigma = sigma, lag.max = 12, orth = TRUE)
+all.equal(k, k.ss, check.attributes = FALSE)
+
+g.ss = SScov(ss, Sigma = sigma, lag.max = 12)
+all.equal(g, g.ss)
+```
+
+State space models (like VARMA models) are by no means unique. Even the state space dimension $s$ is not unique. A model is called *minimal* if its state space dimension is minimal among all state space models which describe the process. A state space model is called *observable* (respectively *reachable*) if the observability matrix 
+$O = (C',A'C',\ldots,(A')^{s-1}C')'\in \mathbb{R}^{ns\times s}$ has rank $s$ (respectively if the reachability matrix $(B,AB,\ldots,A^{s-1}B)\in\mathbb{R}^{s\times ns}$ has rank $s$). It is a fundamental result in the theory of state space models that a state space model is minimal if and only the model is both observable and reachable. The minimal state dimension is equal to the rank of the Hankel matrix $H$ of the impulse response coefficients $(k_j)$. 
+
+
+The `dse` tools `observability` and `reachability` compute the singular values of the 
+observability respectively of the reachability matrices. 
+```{r}
+svO = dse::observability(ss)
+svR = dse::reachability(ss)
+signif(rbind(svO,svR),4)
+```
+Inspecting these singular values shows that the model is not reachable and hence is *not minimal*. This observation is also verified by the fact that the state variance $P$ is not regular. The eigenvalues of $P$ are 
+```{r}
+P = lyap(ss$F, ss$K %*% sigma %*% t(ss$K)) # compute the state variance P 
+eigen(P, only.values = TRUE)$values
+```
+
+One possibility to achieve a minimal model is to use a "balancing and truncation" scheme. The `dse` package offers the function `balanceMittnik(model,n)` to this end. The (optional) parameter `n` is the desired state dimension. Here we use `n=4` based on the fact that only $4$ of the reachability singular values are significantly greater than zero. The following code computes a (minimal) state space model with a state space dimension $4$ and checks that this model really is an equivalent description of the process $(y_t)$:
+```{r}
+ssb = dse::balanceMittnik(ss, n=4)
+ssb
+k.ss = SSirf(ss, Sigma = sigma, lag.max = 12, orth = TRUE)
+all.equal(k, k.ss, check.attributes = FALSE)
+```
+
+To check the stability assumption we may use the function `stability`. For the miniphase assumption there is no corresponding tool. However, it is not difficult to check this assumption "manually" by computing the eigenvalues of $(A-BC)$ (respectively using the `dse` notation of $(F-KH)$): 
+```{r}
+dse::stability(ssb)
+lambda = eigen(ssb$F - ssb$K %*% ssb$H)$values
+cat(ifelse((max(abs(lambda))<1), 
+           'The system is strictly miniphase\n', 
+           'The system is not strictly miniphase\n'))
+```
+
+Even minimal systems are not identifiable. There is still the freedom to apply 
+a state space transformation $x_t \longrightarrow T x_t$, where 
+$T\in \mathbb{R}^{s\times s}$ is non singular. The state parameter matrices then are 
+transformed as 
+$$
+\begin{array}{rcl}
+A &\rightarrow& T A T^{-1} \\
+B &\rightarrow& T B \\
+C &\rightarrow& C T^{-1}
+\end{array}
+$$
+See also the function `dse::gmap`. 
+
+
+Analogously to the VARMA case one may define an echelon canonical form for state space models. The parameter matrices have certain elements which are restricted to be one or zero and the position of these restricted elements again are determined by the Kronecker indices of the Hankel matrix of the impulse response coefficients. The utility function `impresp2SS` computes the state space model in echelon form for a given impulse response function. (This  provides an alternative to construct a (unique, minimal) state space model which is equivalent to a given VARMA model.) 
+
+```{r}
+sse = impresp2SS(k$psi, type = 'echelon')$ss
+sse
+k.ss = SSirf(sse, Sigma = sigma, lag.max = 12, orth = TRUE)
+all.equal(k, k.ss, check.attributes = FALSE)
+```
+For this model the number of "free parameters" is 
+`r junk = c(sse$F, sse$K, sse$H); sum((junk!=0)&(junk!=1))`.
+
+# Estimation
+
+## Data 
+
+In order to illustrate the estimation of VARMA and state space models here we use a data set from the "FRED (Federal Reserve Economic Data)" database (https://fred.stlouisfed.org). We use the following three quarterly time series series: 
+
+* `DPIC96` Real Disposable Personal Income
+* `GPDIC1` Real Gross Private Domestic Investment
+* `PCECC96` Real Personal Consumption Expenditures
+
+The variables are measured in Billions of Chained 2009 Dollars.
+
+We consider the quarterly growth rates (i.e. the differences of the log values) 
+and demean and scale the growth rates such that the sample variance is equal to one. 
+The whole date set is split into two parts: The data from 1985 to 1991 is used for the 
+estimation of the models and the data from 1992 to the end of 2017 is used for the 
+comparison of the models (in terms of their predictive power).
+
+We use a matrix `y` to store the data (for estimation with the `MTS` tools) and 
+a `TSdata` object which is used for the estimation by `dse` tools.
+
+```{r data, eval = TRUE, echo = TRUE}
+# read the data into an R data.frame object
+data = read.delim(file = 'prCoIn_Quarterly.txt',header=TRUE)
+data$DATE = as.Date(data$DATE)
+
+# compute the quarterly growth rates 
+data$consumption = c(NA,diff(log(data$PCECC96)))
+data$investment = c(NA,diff(log(data$GPDIC1)))
+data$income = c(NA,diff(log(data$DPIC96)))
+
+# skip the data before 1958
+d = as.POSIXlt(data$DATE)
+data = data[d >= as.POSIXlt('1958-01-01'), ]
+d = d[d >= as.POSIXlt('1958-01-01')]
+
+# collect the time series to be analyzed in the matrix "y"
+y = cbind(data$consumption,data$investment,data$income)
+colnames(y) = c('consumption','investment','income')
+rownames(y) = paste(format(data$DATE,'%Y'),
+                    quarters(data$DATE),sep=' ')
+
+n = ncol(y)      # number of variables 
+T.obs = nrow(y)  # total sample size
+T.est = sum(d < as.POSIXlt('1992-01-01')) # estimation sample
+
+# demean and scale the data
+y = scale(y, center = colMeans(y[1:T.est,]), 
+             scale =  sqrt((T.est-1)/T.est)*apply(y[1:T.est,], 
+                                        MARGIN = 2, FUN = sd))
+
+data.start = c(1900 + d[1]$year, d[1]$mon %/% 3 +1)
+data.end = c(1900 + d[T.obs]$year, d[T.obs]$mon %/% 3 +1)
+est.end  = c(1900 + d[T.est]$year, d[T.est]$mon %/% 3 +1)
+
+# construct "dse" TSdata objects
+sample = dse::TSdata(output = y)
+sample = tframed(sample, list(start=data.start, frequency=4))
+estimation.sample = tfwindow(sample, end = est.end)
+
+# plot the data
+par(oma = c(0,0,0,0), mar = c(2,2,1,0)+0.1, tcl = -0.2, 
+    mgp = c(1.25, 0.15, 0), cex.main = 1, cex.axis = 0.75)
+tfplot(sample)
+
+cat('(quarterly) data: ', paste(colnames(y), collapse=','), '\n', 
+    'total sample:       ', rownames(y)[1],'-',rownames(y)[T.obs], '  ',
+    T.obs, ' observations\n',
+    'estimation sample:  ', rownames(y)[1],'-',rownames(y)[T.est], '  ', 
+    T.est, ' observations\n',
+    'validation sample:  ', rownames(y)[T.est+1],'-',rownames(y)[T.obs], '  ', 
+    T.obs-T.est, ' observations\n',sep='')
+```
+
+## Evaluate and Forecast 
+
+In order to evaluate the "fit" of a given model on a data set we may use the `dse::l()` function which in particular computes the (log) likelihood of the model. The output of this command is a `TSestModel` which is an object which stores the model, the data and the estimation results. 
+
+```{r}
+arma = l(arma, estimation.sample)
+summary(arma)
+```
+
+Forecasts may be computed by the `dse` functions `forecast`, `horizonForecasts` and `featherForecasts`. The function `dse::forecast` computes the out-of-sample forecasts for a given model and sample. In the example below we compute the forecasts for 2018-2020, i.e. for forecast horizons  $h=1,2,\ldots,12$. The corresponding `MTS` function (for estimated VARMA models) is `MTS::VARMApred`. 
+
+The function `dse::horizonForecasts` computes the $h$-step ahead forecasts for all time points within a sample. The forecasts are "aligned" with the original data, such that it is easy to compute the forecast errors. In the code below we use the state space model `sse` (which is equivalent to the VARMA model `arma`) in order to show that the syntax is independent of the object class. The optional parameter `discard.before` means that predictions based on data up to this time point should be discarded (i.e. are set to zero). 
+
+```{r forecasts}
+# compute the "out-of-sample" forecast for 3 years 
+z = suppressWarnings(forecast(arma,data=sample,horizon=4*3)) 
+
+par(oma = c(0,0,0,0), mar = c(2,2,2,0)+0.1, tcl = -0.2, 
+    mgp = c(1.25, 0.15, 0), cex.main = 1, cex.axis = 0.75)
+tfplot(z,start=c(2010,1)) # plot the end of the sample
+
+# extract the "out-of-sample" forecast for 2018
+window(z$forecast[[1]], end=c(2018,4))
+
+z = suppressWarnings(horizonForecasts(sse, sample, 
+            horizons = c(1,4), discard.before = T.est))
+# plot a subsample
+tfplot(z, start = c(1991,1), end = c(1995,4)) 
+
+# extract the forecasts/errors for "income"
+junk = cbind(sample$output[,3], t(z$horizonForecasts[,,3]), 
+       sample$output[,c(3,3)] - t(z$horizonForecasts[,,3]))
+colnames(junk) = c(colnames(z$data$output)[3], 
+       t(outer(c('pred h=','err h='),c(1,4),paste,sep='')))
+rownames(junk) = rownames(y)
+round(junk[(T.est-3):(T.est+8),],4)
+```
+
+## Estimate Models 
+
+### Estimate VAR Models 
+
+Of course it is easy to estimate autoregressive models with both packages. Here we use `dse::estVARar` which is based on the Yule-Walker equations. The order is estimated by the AIC information criterion. (The estimated order here is $p=2$.) This VAR model will serve as a kind of benchmark model. 
+
+```{r VAR}
+model.VAR =  dse::estVARXar(estimation.sample, aic = TRUE)
+summary(model.VAR)
+```
+
+
+### Estimate State Space Models 
+
+The `dse` package offers a number of functions to estimate state space models. The package author suggest to use `bft` (brute force technique), so we we follow this advice. The main idea of this technique (which is a particular *subspace algorithm*) is as follows. First estimate a "long" AR model, i.e. with a high order $p$. Next convert this model to a state space model and then use a model reduction technique to construct a state space model of the desired order $s$. This procedure is repeated for a number of AR orders $p$ and state space dimensions $s$ and finally the model which is the best in terms of an information criterion is returned. 
+
+The following `R` code estimates two state space models, the first one uses "BIC" as selection criterion (and returns a state model of order $s=1$) 
+and the second one uses "AIC" (which results in $s=3$).
+
+```{r BFT}
+model.BFTbic = dse::bft(estimation.sample, 
+                        criterion = 'tbic', verbose = FALSE)
+summary(model.BFTbic)
+
+model.BFTaic = dse::bft(estimation.sample, 
+                        criterion = 'taic', verbose = FALSE)
+summary(model.BFTaic)
+```
+
+Next we try to enhance these models with maximum likelihood. The corresponding function is `dse::estMaxLik` which simply takes an "initial" model as main argument. Note that both `model.BFTbic` and `model.BFTaic` are `TSestModel` objects and thus contain the (estimation) data. 
+
+```{r BFTML}
+model.BFTbicML = estMaxLik(model.BFTbic)
+summary(model.BFTbicML)
+
+model.BFTaicML = estMaxLik(model.BFTaic)
+summary(model.BFTaicML)
+```
+
+### Estimation of VARMA Models
+
+The function `dse::estMaxLik` can also deal with VARMA models. However, one first has to find an appropriate initial estimate and we could not a find a suitable `dse`  function for this purpose. (Of course one could first estimate a state space model and then convert this to a VARMA model.) 
+`estMaxLik` uses a simple (and flexible) scheme to deal with constraints. It simply treats coefficients (of the initial model) which are zero or one 
+as fixed. One may also impose more complicated constraints with the function `dse::fixConstants`.  However, it is not clear how one could impose a constraint like $a_0=b_0$ and thus it is not possible to estimate VARMA model in echelon canonical form. 
+
+For these reason we use the `MTS` package for estimation of VARMA models. A VARMA(p,q) model (without further structure) may be estimated with `MTS::VARMA` (or `MTS::VARMAcpp` where the computation of the likelihood is implemented in C++ ). The initial estimate is computed by the HRK algorithm. The output of this function is a list which in particular contains the estimated AR (`$Phi`) and MA (`$Theta`) parameters. In order to be able to easily compare this ARMA model with the above estimated state space models, we convert the result of `MTS::VARMA` to a `dse::TSestModel` object. 
+
+```{r ARMA11}
+out = MTS::VARMACpp(y[1:T.est,], p=1, q=1, 
+                    include.mean = FALSE, details = FALSE)
+
+
+model.ARMA11 = PhiTheta2ARMA(out$Phi, out$Theta, 
+                  output.names = seriesNames(sample)$output) 
+model.ARMA11 = dse::l(model.ARMA11, estimation.sample)
+
+summary(model.ARMA11)
+```
+
+
+Next we estimate VARMA models in echelon canonical form (with `MTS::Kronfit`) for Kronecker indices $\nu=(1,0,0)$, $\nu=(1,1,0)$,  $\nu=(1,1,1)$,  and  $\nu=(2,1,1)$. The output of these computations is quite lengthy and thus we don't include it here.
+
+```{r ARMAxxx, results = 'hide'}
+out = suppressWarnings(MTS::Kronfit(da = y[1:T.est,], 
+              kidx = c(1,0,0), include.mean = FALSE))
+model.ARMA100 = PhiTheta2ARMA(out$Phi, out$Theta, out$Ph0, 
+      fix = T, output.names = seriesNames(sample)$output)
+model.ARMA100 = dse::l(model.ARMA100, estimation.sample)
+summary(model.ARMA100)
+
+out = suppressWarnings(MTS::Kronfit(da = y[1:T.est,], 
+              kidx = c(1,1,0), include.mean = FALSE))
+model.ARMA110 = PhiTheta2ARMA(out$Phi, out$Theta, out$Ph0, 
+      fix = T, output.names = seriesNames(sample)$output)
+model.ARMA110 = dse::l(model.ARMA110, estimation.sample)
+summary(model.ARMA110)
+
+out = suppressWarnings(MTS::Kronfit(da = y[1:T.est,], 
+              kidx = c(1,1,1), include.mean = FALSE))
+model.ARMA111 = PhiTheta2ARMA(out$Phi, out$Theta, out$Ph0, 
+      fix = T, output.names = seriesNames(sample)$output)
+model.ARMA111 = dse::l(model.ARMA111, estimation.sample)
+summary(model.ARMA111)
+
+out = suppressWarnings(MTS::Kronfit(da = y[1:T.est,], 
+              kidx = c(2,1,1), include.mean = FALSE))
+model.ARMA211 = PhiTheta2ARMA(out$Phi, out$Theta, out$Ph0, 
+      fix = T, output.names = seriesNames(sample)$output)
+model.ARMA211 = dse::l(model.ARMA211, estimation.sample)
+summary(model.ARMA211)
+```
+
+Note that the VARMA model which has been used throughout the first two sections of this demonstration is a "rounded" version of the last model  estimated, i.e. the model for $\nu = (2,1,1)$. 
+
+```{r}
+all.equal(list(Ph0=phi0,Phi=phi,Theta=theta), 
+          lapply(out[c('Ph0','Phi','Theta')],round,3))
+```
+
+
+## Compare Models 
+
+The `dse` package provides some nice tools to compare and evaluate a set of estimated models. We start with evaluation the "in-sample" performance of the models with `dse::informationTests`. 
+
+```{r infoTests}
+info = dse::informationTests(model.VAR, model.BFTbic, 
+            model.BFTbicML, model.BFTaic, model.BFTaicML, 
+            model.ARMA11, model.ARMA100, model.ARMA110, 
+            model.ARMA111, model.ARMA211)
+```
+
+The information criteria of course heavily depend on the number of "free" parameters of the 
+respective models. As noted above the default strategy of `dse` is to consider the coefficients of the 
+parameter matrices which are not equal to one or zero as "free" and to consider the 
+zero/one coefficients as "fixed". The `dse::summary(model)` command prints this number of "free" 
+parameters as `actual number of parameters`. 
+
+* For a general state space model this gives $2ns+s^2$ parameters. However, this does not 
+  account for the fact that the parameter matrices are only unique up to state space transformations. 
+  Therefore `dse::informationTests` also uses the so called "theoretical number of parameters": 
+  $2ns$. In the summary table below we report the information criteria based on this 
+  "theoretical number of parameters".     
+* For VARMA models in echelon form the "actual number of parameters" is not correct since it does 
+  not account for the constraint $a_0 = b_0$.      
+  The function `dse::fixConstants` allows to set any coefficient as "fixed" or as "free". 
+  In order to force `dse::informationTests` to use the correct number of free parameters 
+  $2n(\nu_1 +\cdots + \nu_n)$ for a model  in echelon form, we use  `dse::fixConstants` 
+  and "fix" all zero/one coefficients **and** all entries of $b_0$. This is accomplished 
+  in the code above by calling `PhiTheta2ARMA` with the optional argument `fix=TRUE`. 
+
+The following code extracts the relevant information criteria and produces a `LaTeX` table. 
+```{r infoTests2, results='asis'}
+library(kableExtra)
+estimates = c('VAR',
+              'BFTbic', 'BFTbicML', 'BFTaic', 'BFTaicML',
+              'ARMA11', 'ARMA100', 'ARMA110', 'ARMA111', 'ARMA211')
+n.estimates = length(estimates)
+n.par = integer(n.estimates)
+names(n.par) = estimates
+n.par['VAR'] = (n^2) * (dim(model.VAR$model$A)[1]-1)
+n.par['BFTbic']   = 2*n* nrow(model.BFTbic$model$F)
+n.par['BFTbicML'] = 2*n* nrow(model.BFTbicML$model$F)
+n.par['BFTaic']   = 2*n* nrow(model.BFTaic$model$F)
+n.par['BFTaicML'] = 2*n* nrow(model.BFTaicML$model$F)
+n.par['ARMA11'] = (n^2)*2
+n.par['ARMA100'] = 2*n*1
+n.par['ARMA110'] = 2*n*2
+n.par['ARMA111'] = 2*n*3
+n.par['ARMA211'] = 2*n*4
+
+# for the state space models use the "theoretical number of paramaters"
+info1 = info[,1:7]
+info1[2:5,3:7] = info[2:5,8:12]
+
+junk = data.frame(n.par,info1)
+rownames(junk) = estimates
+colnames(junk)[1] = '\\#par'
+for (i in 2:ncol(junk)) {
+  x = junk[[i]]
+  is.min = (x == min(x))
+  x = round(x,1)
+  junk[[i]] = cell_spec(x, background = ifelse(is.min,"#90EE90","white"))
+}
+kable(junk, caption = "In-sample (information) criteria of the estimated models: 
+\\textbf{\\#par} - number of parameters, \\textbf{port} - Portmanteau test, 
+\\textbf{like} - neg. log likelihood, \\textbf{aic} - Akaike Information Criterion,
+\\textbf{bic} - Bayes  Information Criterion, \\textbf{gvc} - Generalized Cross Validation,
+\\textbf{rice}  - Rice Criterion,  \\textbf{fpe} - Final Prediction Error.", digits = 1, 
+      escape = F, booktabs = T, linesep = "") %>% 
+  row_spec(0, bold = TRUE)
+```
+
+
+The "out-of-sample" performance of these model is evaluated by considering the $1$-step ahead prediction errors. 
+
+```{r fCov}
+z = dse::forecastCov(model.VAR, model.BFTbic, 
+             model.BFTbicML, model.BFTaic, model.BFTaicML, 
+             model.ARMA11, model.ARMA100, model.ARMA110, 
+             model.ARMA111, model.ARMA211, data = sample, 
+             horizons = 1:4, discard.before = T.est)
+
+# extract MSE for each series and the total MSE
+mse = array(0, dim = c(ncol(y)+1,4,n.estimates), 
+            dimnames = list(c(colnames(y),'total'), 
+                          paste('h=',1:4,sep=''), estimates))
+for (k in (1:n.estimates)) {
+  for (h in (1:4)) {
+    mse[,h,k] = c(diag(z$forecastCov[[k]][h,,]),
+                  sum(diag(z$forecastCov[[k]][h,,])))
+}}
+mse = aperm(mse,c(2,3,1))
+round(mse,4)
+```
+
+The following code extracts the MSE of the one-step ahead predictions produces a `LaTeX` table.  
+```{r fCov2, results='asis'}
+junk = data.frame(mse[1,,])
+junk$rVAR = (1 -junk$total / junk$total[1]) * 100
+rownames(junk) = estimates
+for (i in 1:ncol(junk)) {
+  x = junk[[i]]
+  if (i <ncol(junk)) {
+    is.min = (x == min(x))
+  } else {
+    is.min = (x == max(x))
+  }
+  if (i < ncol(junk)) {
+    x = sprintf('%1.3f',junk[[i]])
+  } else {
+    x = sprintf('%1.1f%%',junk[[i]])
+  }
+  junk[[i]] = cell_spec(x, background = ifelse(is.min,"#90EE90","white"))
+}
+kable(junk, caption = "This table shows the (out-of-sample) mean squared 
+errors of the estimated models for the $1$-step ahead prediction. 
+The column \\texttt{total} is the sum of the MSE values for the 
+three series (consumption, investment and income). The last column 
+reports the percentage improvement as compared to the VAR model.", 
+      align = 'r', escape = F, booktabs = T, linesep = "") %>% 
+  row_spec(0, bold = TRUE)
+```
+
+### Discussion and notes
+
+* In-sample-performance: 
+    + The `ARMA211` model is the most complex model ($24$ free parameters) and thus it is no surprise that 
+      this model is optimal in terms of the likelihood. 
+    + The models `BFTaicML`, `ARMA11`, `ARMA111` are obtained by optimizing the likelihood over essentially 
+      the same set of models (VARMA($1,1$) or state space models with a state space dimension $s=3$). 
+      Accordingly `BFTaicML`, `ARMA111` have the same likelihood value. However, `ARMA11` is much worse. 
+      This is an indication that the initial estimate is crucial for the ML estimation. 
+    + The models `BFTaicML`, `ARMA111` are the best models with respect to the information criteria. Only 
+      the BIC criterion picks the more parsimonious model `BFTbicML`. 
+* Out-of-sample performance, prediction quality:
+    + The MSE values of the predictors are quite similar for most of the models (and time series). Therefore the ranking 
+      has to be interpreted with some care. For a careful analysis one should test whether the differences are 
+      "statistically significant", e.g. by a Diebold Mariano test. 
+    + The models `BFTaicML`, `ARMA111` are also the best models in terms of out-of-sample prediction. 
+    + By construction the ML estimates `BFTbicML`, `BFTaicML` yield better likelihood values than the corresponding 
+      initial estimates  `BFTbic` and `BFTaic`. For the data considered here the ML estimates also give better predictions, i.e. 
+      there is a (small) performance gain. 
+    + The ARMA11 model performs badly. 
+* Of course the above notes cannot easily be generalized. The results heavily depend on the data considered.
+* None of the above estimation schemes guarantees stable and miniphase models. So to be sure one should check 
+  the estimated models as described above. 
+* The maximum likelihood methods use a simplified version of the (negative log) likelihood. 
+* The computations have been carried out with the following versions: `R`:  `r R.version.string`,  `MTS`: `r packageVersion("MTS")`, 
+  `dse`: `r packageVersion("dse")`,  `QZ`: `r packageVersion("QZ")`,  `kableExtra`: `r packageVersion("kableExtra")`.
+
+
+
+# R-Tools
+
+In this section we give a short description of the tools used in this R-demonstration. 
+
+
+## `ARMA2PhiTheta`:
+
+Extracts the AR/MA coefficients of a `dse::ARMA` object and 
+returns these coefficient matrices in the style of the `MTS` package.
+
+```{r, echo=FALSE, results='asis'}
+cat("
+\\subsubsection*{Usage}
+\\begin{verbatim}
+ARMA2PhiTheta = function(arma, normalizePhi0 = TRUE)
+\\end{verbatim}
+\\subsubsection*{Arguments}
+\\begin{description}
+\\item \\texttt{arma} \\texttt{dse::ARMA} object.
+\\item \\texttt{normalizePhi0} if TRUE then the lag zero coefficent matrix 
+       is normalized to the identity matrix and the other coefficients are 
+       correspondingly transformed.
+\\end{description}
+\\subsubsection*{Value}
+\\begin{description}
+\\item \\texttt{Phi} $(n \\times np)$ matrix containing the AR parameters
+       $\\phi = [\\phi_1,\\ldots,\\phi_p]$.
+\\item \\texttt{Theta} $(n \\times np)$ matrix containing the MA parameters
+       $\\theta = [\\theta_1,\\ldots,\\theta_q]$.
+\\item \\texttt{Phi0} $(n \\times n)$ matrix containing the lag zero coefficient 
+       matrix $\\phi_0 = \\theta_0$.
+\\end{description}
+\\subsubsection*{Examples}
+\\begin{verbatim}
+A = array(c(1, .5, .3, 0.4, .2, .1, 0, .2, .05, 1, .5, .3) ,c(3,2,2))
+B = array(c(1, .2, 0.4, .1, 0, 0, 1, .3), c(2,2,2))
+arma = dse::ARMA(A = A, B = B, C=NULL,
+                 output.names = paste('y', 1:2, sep = ''))
+ARMA2PhiTheta(arma)
+m = ARMA2PhiTheta(arma, normalizePhi0 = FALSE)
+arma.test = PhiTheta2ARMA(m$Phi, m$Theta, m$Phi0)
+all.equal(arma, arma.test)
+\\end{verbatim}
+")
+```
+
+
+## `basis2kidx`: Kronecker indices
+
+Determine the Kronecker indices, given the indices of the basis rows of the Hankel 
+matrix of the impulse response function.
+
+```{r, echo=FALSE, results='asis'}
+cat("
+\\subsubsection*{Usage}
+\\begin{verbatim}
+basis2kidx = function(basis, n)
+\\end{verbatim}
+\\subsubsection*{Arguments}
+\\begin{description}
+\\item \\texttt{basis} (integer) vector with the indices of the basis rows of the
+                      Hankel matrix of the inmpulse response.
+\\item \\texttt{n} (integer) dimension of the process.
+\\end{description}
+\\subsubsection*{Value}
+n-dimensional (integer) vector with the Kronecker indices.
+\\subsubsection*{Examples}
+\\begin{verbatim}
+basis2kidx(c(1,2,3), 2)
+basis2kidx(c(1,2,4), 2)
+## Not run: 
+## basis2kidx(c(1,2,5),2) # this is not a 'nice' basis!
+## End(Not run)
+\\end{verbatim}
+")
+```
+
+## `fevd`: Forecast Error Variance Decomposition
+
+Computes the Forecast Errors Variance Decomposition from a given orthogonalized
+impulse response function. It seems that the `MTS:FEVdec` implementation 
+has a bug. Furthermore the orthogonalization scheme via a Cholesky decomposition 
+of the covariance of the innovations is "hard coded". Therefore, here we offer 
+an alternative, more flexible approach.
+
+
+```{r, echo=FALSE, results='asis'}
+cat("
+\\subsubsection*{Usage}
+\\begin{verbatim}
+fevd = function(irf, dim = NULL)
+\\end{verbatim}
+\\subsubsection*{Arguments}
+\\begin{description}
+\\item \\texttt{irf} orthogonalized impulse response function, as computed
+              eg. by \\texttt{MTS:VARMAirf} or \\texttt{SSirf}.
+              \\newline
+              \\texttt{irf} may be a 3-dimensional array of dimension
+              $(n\\times n \\times l)$ or a matrix which is then coerced 
+              to such an array, see the paramater \\texttt{dim} below.
+\\item \\texttt{dim} integer vector of length 3. If this (optional) parameter 
+           is given then \\texttt{irf} is coerced to an array with 
+           \\texttt{irf = array(irf, dim = dim)}. Note that 
+           \\texttt{dim[1]==dim[2]} must hold.
+\\end{description}
+\\subsubsection*{Value}
+\\begin{description}
+\\item \\texttt{vd} $(n\\times n \\times l)$ dimensional array which contains 
+           the forecast error variance decomposition: 
+           \\texttt{vd[i,j,h]} is the percentage of the variance of the
+           h-step ahead forecast error of the i-th component due to the j-th
+           orthogonalized shock. 
+\\item \\texttt{v} $(n \\times l)$ matrix which contains the forecast error variances:
+           \\texttt{v[i,h]} is the variance of the h-step ahead forecast error 
+           for the i-th component.
+
+\\end{description}
+\\subsubsection*{Examples}
+\\begin{verbatim}
+phi = matrix(c( 0.5, -0.7,  0.3, 0.75,
+               -0.2, -0.5,  0.4,-0.90),
+byrow = TRUE, nrow = 2)
+theta = matrix(c(-0.1, -0.8,
+                 0.7, -0.1),
+               byrow = TRUE, nrow = 2)
+k = MTS::VARMAirf(Phi = phi, Theta = theta,
+                  lag = 24, orth = TRUE)
+out = fevd(k$irf, dim = c(2,2,25))
+plotfevd(out$vd)
+\\end{verbatim}
+")
+```
+
+
+
+## `impresp2PhiTheta`: Construct a VARMA model from an impulse response
+
+The model returned is in echelon canonical form. Note that this means in particular that $\phi_0=\theta_0$ is (in general) a lower triangular matrix.
+
+
+```{r, echo=FALSE, results='asis'}
+cat("
+\\subsubsection*{Usage}
+\\begin{verbatim}
+impresp2PhiTheta = function(k, tol = 1e-8)
+\\end{verbatim}
+\\subsubsection*{Arguments}
+\\begin{description}
+\\item \\texttt{k} $(n \\times n(l_{\\mbox{max}}+1))$ matrix which contains the impulse 
+          response coefficients, e.g. computed by \\texttt{MTS:VARMAirf}.
+\\item \\texttt{tol} tolerance used by \\texttt{qr} to estimate the rank and
+          the basis of the Hankel matrix $H$ of the impulse response function.
+\\end{description}
+\\subsubsection*{Value}
+\\begin{description}
+\\item \\texttt{Phi} $(n \\times np)$ matrix containing the AR parameters
+       $\\phi = [\\phi_1,\\ldots,\\phi_p]$.
+\\item \\texttt{Theta} $(n \\times np)$ matrix containing the MA parameters
+       $\\theta = [\\theta_1,\\ldots,\\theta_q]$.
+\\item \\texttt{Phi0} $(n \\times n)$ matrix, lag zero coefficient $\\phi_0=\\theta_0$.
+\\item \\texttt{kidx} n-dimensional (integer) vector with the Kronecker indices.
+\\item \\texttt{Hrank} estimated rank of the Hankel matrix, as computed by
+        \\texttt{qr}.
+\\item \\texttt{Hpivot} vector of pivot elements, returned by \\texttt{qr}. 
+       Note that the first \\texttt{Hrank} elements of this vector are the 
+       indices of the basis rows of the Hankel matrix.
+\\end{description}
+")
+```
+
+## `impresp2SS`: Construct a state space model from an impulse response
+
+This function implements the Ho-Kalman realization algorithm which determines a state
+space realization for a given impulse response function.
+
+For the case `type=="echelon"` a state space system in echelon canonical form
+is returned and for `type=="balanced"` a kind of balanced realization. The core
+step of this algorithm is to determine a basis for the row space of
+the Hankel matrix $H$ of the impulse response coefficients.
+
+In the first case this is done via a QR decomposition of the transposed Hankel
+matrix with the R function `qr` using the tolerance parameter `tol`.
+If the optional parameter `s` is missing or `NULL` then the rank of the
+Hankel matrix and hence the state space dimension is determined from this
+QR decomposition. If `s` is given then the algorithm constructs a state
+space model with this specified state space dimension. However, this option should
+be used with care. There is no guarantee that the so constructed model is
+a reasonable approximation for the true model.
+
+For the "balanced" case an SVD decomposition of the Hankel matrix is used. For missing
+`s` the rank of the Hankel matrix is determined from the singular values of
+the matrix using `tol` as a threshold, i.e. the rank is estimated as the number of
+singular values which are larger than or equal to `tol` times the
+largest singular value. If `s` is specified then the first `s` right
+singular vectors are used as a basis for row space of the Hankel matrix and 
+a state space model with state space dimension `s` is returned.
+
+
+```{r, echo=FALSE, results='asis'}
+cat("
+\\subsubsection*{Usage}
+\\begin{verbatim}
+impresp2SS = function(k, type = c('echelon','balanced'), tol = 1e-8, s)
+\\end{verbatim}
+\\subsubsection*{Arguments}
+\\begin{description}
+\\item \\texttt{k} $(n \\times n(l_{\\mbox{max}}+1))$ matrix which contains the impulse 
+          response coefficients, e.g. computed by \\texttt{MTS:VARMAirf}.
+\\item \\texttt{type} (string) determines the type of the realization, 
+         see the description above.
+\\item \\texttt{tol} tolerance parameter, see the description above.
+\\item \\texttt{s} desired state dimension, see the description above.
+\\end{description}
+\\subsubsection*{Value}
+\\begin{description}
+\\item \\texttt{ss} a \\texttt{dse::SS} object which represents the
+         constructed innovation form state space model.
+\\item \\texttt{Hsv} for \\texttt{type=='balanced'}: a vector with the 
+        singular values of the Hankel matrix of the impulse response.
+\\item \\texttt{kidx} for \\texttt{type=='echelon'}: n-dimensional (integer) 
+        vector with the Kronecker indices.
+\\item \\texttt{Hrank} for \\texttt{type=='echelon'}: estimated rank of 
+       the Hankel matrix, as computed by \\texttt{qr}.
+\\item \\texttt{Hpivot} for \\texttt{type=='echelon'}: vector of pivot elements, 
+       returned by \\texttt{qr}. Note that the first \\texttt{Hrank} elements of 
+       this vector are the indices of the basis rows of the Hankel matrix.
+\\end{description}
+")
+```
+
+## `is.stable`: Check the stability of a matrix polynomial
+
+This function checks the roots of the determinant of a polynomial matrix
+$$
+I - a_1 z - \cdots - a_p z^p
+$$
+and returns `TRUE` if all roots are outside the unit circle. 
+The roots are determined from the eigenvalues of the companion matrix, 
+i.e. the roots are the reciprocals of the non-zero eigenvalues of the 
+companion matrix.
+
+```{r, echo=FALSE, results='asis'}
+cat("
+\\subsubsection*{Usage}
+\\begin{verbatim}
+is.stable = function(A) 
+\\end{verbatim}
+\\subsubsection*{Arguments}
+\\begin{description}
+\\item \\texttt{A} $(n \\times np)$ matrix with the polynomial coefficients 
+       $A = (a_1,\\ldots,a_p)$.
+\\end{description}
+\\subsubsection*{Value}
+a scalar logical with an attribute \\texttt{z} which contains the roots.
+\\subsubsection*{See Also}
+\\texttt{dse:polyrootDet}.
+")
+```
+
+## `lyap`: Lyapunov equation
+
+Solve the Lyapunov equation:
+$$ 
+P = A P A' + Q
+$$
+It is assumed that $Q$ is symmetric and that $A$ is stable, i.e. that 
+the eigenvalues of $A$ have moduli less than one.
+
+The procedure uses the Schur decomposition method as in *Kitagawa,
+An Algorithm for Solving the Matrix Equation $X = F X F' + S$,
+International Journal of Control, Volume 25, Number 5, pages 745--753
+(1977)*.
+and the column-by-column solution method as suggested in
+*Hammarling, Numerical Solution of the Stable, Non-Negative
+Definite Lyapunov Equation, IMA Journal of Numerical Analysis, Volume
+2, pages 303--323 (1982)*.
+
+The Schur decomposition of $A$ is computed with `QZ::qz.zgees`.
+
+```{r, echo=FALSE, results='asis'}
+cat("
+\\subsubsection*{Usage}
+\\begin{verbatim}
+lyap = function(A,Q) 
+\\end{verbatim}
+\\subsubsection*{Arguments}
+\\begin{description}
+\\item \\texttt{A} $(n \\times n)$ (stable) matrix.
+\\item \\texttt{Q} $(n \\times n)$ (symmetric) matrix.
+\\end{description}
+\\subsubsection*{Value}
+\\begin{description}
+\\item \\texttt{P} solution of the Lyapunov equation.
+\\end{description}
+\\subsubsection*{Examples}
+\\begin{verbatim}
+A = matrix(rnorm(4),nrow=2,ncol=2)
+Q = matrix(rnorm(4),nrow=2,ncol=2)
+Q = Q %*% t(Q)
+P = lyap(A,Q)
+\\end{verbatim}
+")
+```
+
+
+## `PhiTheta2ARMA`:
+
+This function constructs an `dse::ARMA` object for given AR/MA parameter 
+matrices (in the style of the MTS package).
+
+The dse Package uses a simple strategy to impose restrictions on the parameters of a models. 
+It simply treats all coefficients equal to one or zero as fixed and the others as "free". 
+However for a model in *echelon form* in addition $a_0=b_0$ must hold. Ignoring this constraint 
+has to effects. First `dse::informationTests` does not use the correct number of free parameters 
+and hence it does not return the correct values for information criteria like AIC. 
+Second, if the model is feed into `dse::estMaxLik` then the estimated model will in general 
+not be in echelon canonical form.
+
+In order to circumvent the first problem this function offers the switch `fix`. For `fix=TRUE` the 
+function calls `dse::fixConstants` and sets all zero/one entries as fixed and in addition all 
+entries of $b_0$. By this trick `dse::informationTests` then uses the right number of free 
+parameters corresponding to a model in echelon form. However this trick does not solve the second problem.
+
+
+
+```{r, echo=FALSE, results='asis'}
+cat("
+\\subsubsection*{Usage}
+\\begin{verbatim}
+PhiTheta2ARMA = function(Phi, Theta, Phi0 = NULL, fix = FALSE,
+                         output.names = paste('y',1:nrow(Phi),sep=''))
+\\end{verbatim}
+\\subsubsection*{Arguments}
+\\begin{description}
+\\item \\texttt{Phi} $(n \\times np)$ matrix containing the AR parameters
+       $\\phi = [\\phi_1,\\ldots,\\phi_p]$.
+\\item \\texttt{Theta} $(n \\times np)$ matrix containing the MA parameters
+       $\\theta = [\\theta_1,\\ldots,\\theta_q]$.
+\\item \\texttt{Phi0}  $(n \\times n)$ matrix containing the lag zero coefficient matrix
+       $\\phi_0 = \\theta_0$. In the default case \\texttt{Phi0=NULL} 
+       the n-dimensional identity matrix is used.
+\\item \\texttt{fix}  see the discussion above.
+\\item \\texttt{output.names} vector of strings with the respective names for the
+       $n$ components of the ARMA process.
+\\end{description}
+\\subsubsection*{Value}
+\\texttt{dse::ARMA} object.
+\\subsubsection*{Examples}
+\\begin{verbatim}
+phi = matrix(c(-0.5, -0.2, -0.3, -0.05, -0.2, -0.5, -0.1, -0.30),
+byrow = TRUE, nrow = 2)
+theta = matrix(c(-0.2,  0.0, -0.1, -0.3),
+               byrow = TRUE, nrow = 2)
+phi0 = matrix(c(1.0, 0, 0.4, 1),
+              byrow = TRUE, nrow = 2)
+arma = PhiTheta2ARMA(solve(phi0,phi), solve(phi0,theta))
+arma = PhiTheta2ARMA(phi, theta, phi0)
+m = ARMA2PhiTheta(arma, normalizePhi0 = FALSE)
+all.equal(cbind(phi0,phi,theta),cbind(m$Phi0,m$Phi,m$Theta))
+\\end{verbatim}
+")
+```
+
+## `plot3d`: Plot $3$-dimensional arrays
+
+This is as simple function for plotting three dimensional structures, like 
+the impulse response function or the autocovariance function of an ARMA 
+process.
+
+```{r, echo=FALSE, results='asis'}
+cat("
+\\subsubsection*{Usage}
+\\begin{verbatim}
+plot3d = function(x, dim = NULL, labels.ij = NULL,
+                  main = '', xlab = 'lag (k)', ...)
+\\end{verbatim}
+\\subsubsection*{Arguments}
+\\begin{description}
+\\item \\texttt{x}  $(m\\times n\\times l)$ dimensional array, 
+          or a vector/matrix which can be coerced
+          to an array, see below.
+\\item \\texttt{dim} integer vector of length 3. If this (optional) parameter is given
+           then x is coerced to an array with \\texttt{x = array(x, dim = dim)}.
+\\item \\texttt{labels.ij} string which is used to label the panels.
+              E.g. \\newline 
+              \\texttt{labels.ij = 'partialdiff*y[i\\_*k]/partialdiff*epsilon[j\\_*0]'}
+              \\newline 
+              may be used for a plot of an impulse response function. The string
+              should contain \\texttt{'i\\_'}, \\texttt{'j\\_'} as place holders for the
+              indices \\texttt{i,j} of the respective (i,j)-th subpanels.
+\\item \\texttt{main, xlab} main title for the plot and label for the x axis.
+\\item \\texttt{...} other graphical parameters. These parameters are passed on to the 
+          \\texttt{lines()} method.
+\\end{description}
+\\subsubsection*{Value}
+invisibly returns the input \\texttt{x} after beeing coerced to an array.
+\\subsubsection*{Examples}
+\\begin{verbatim}
+plot3d(rnorm(2*3*11), dim = c(2,3,11), main ='test one',
+       labels.ij = expression(corr(x[list(i_,t+k)],x[list(j_,t)])) )
+plot3d(array(rnorm(4*4*21), dim = c(4,4,21)), main ='test two', xlab = 'delay (s)',
+       labels.ij = expression(epsilon[j_*0] %->% y[i_*s]) )
+plot3d(matrix(rnorm(4*100),nrow = 4), dim = c(4,1,100), main ='test three',
+       xlab = 'time t-1', labels.ij = expression(series~i_) )
+\\end{verbatim}
+")
+```
+
+
+## plotfevd: Plot a Forecast Error Variance Decomposition
+
+Generate a plot of a Forecast Error Variance Decomposition.
+
+```{r, echo=FALSE, results='asis'}
+cat("
+\\subsubsection*{Usage}
+\\begin{verbatim}
+plotfevd = function(vd, main = 'forecast error variance decomposition',
+                    xlab = 'forecast horizon (h)', series.names, col)
+\\end{verbatim}
+\\subsubsection*{Arguments}
+\\begin{description}
+\\item \\texttt{vd}  $(n\\times n\\times h)$ array, which contains the 
+             forecast error variance decomposition, as computed e.g. 
+             by \\texttt{fevd}.
+\\item \\texttt{main} main title for the plot.
+\\item \\texttt{xlab} label for the x axis.
+\\item \\texttt{series.names} vector of strings the names for the 
+             component series.
+\\item \\texttt{col} n-dimensional vector of colors.
+\\end{description}
+\\subsubsection*{Value}
+invisible copy of the input \\texttt{vd}.
+\\subsubsection*{Examples}
+\\begin{verbatim}
+vd = array(runif(4*4*20), dim = c(4,20,4))
+v = apply(vd, MARGIN = c(1,2), FUN = sum)
+vd = vd / array(v, dim = c(4,20,4))
+vd = aperm(vd, c(1,3,2))
+plotfevd(vd)
+# of course this sub-sample is not a valid FEVD
+plotfevd(vd[1:2,1:2,1:10], series.names = c('x','y'), col = c('red','blue'))
+\\end{verbatim}
+")
+```
+
+
+## SScov: Autocovariance and autocorrelation function of a state space model
+
+This function computes the autocovariance and autocorrelation function
+of a stationary process represented by a state space model in innovation form.
+The syntax and the return value is analogous to `MTS:VARMAcov`.
+
+Note that the stability of the state space model is not checked.
+
+
+```{r, echo=FALSE, results='asis'}
+cat("
+\\subsubsection*{Usage}
+\\begin{verbatim}
+SScov = function(ss, Sigma = NULL, lag.max = 12L)
+\\end{verbatim}
+\\subsubsection*{Arguments}
+\\begin{description}
+\\item \\texttt{ss} \\texttt{dse:SS} object, which represents an innovation
+           form state space model.
+\\item \\texttt{Sigma} covariance of the innovations 
+             ($(n\\times n)$ symmetric, positive definite matrix). 
+             If \\texttt{NULL} then the $n$-dimensional identity matrix is used.
+\\item \\texttt{lag.max} maximum lag (integer)
+\\end{description}
+\\subsubsection*{Value}
+\\begin{description}
+\\item \\texttt{autocov} $(n\\times n(l_{\\mbox{max}}+1))$ matrix with 
+       the autocovariances.
+\\item \\texttt{ccm} $(n\\times n(l_{\\mbox{max}}+1))$ matrix with 
+       the autocorrelations.
+\\end{description}
+")
+```
+
+
+## SSirf: Impulse response function of a state space model
+
+This function computes the impulse response function and the
+orthogonalized impulse response function of a state space model
+in innovation form. The syntax and the return value is analogous to
+`MTS::VARMAirf`.
+
+The orthognalized innovations are defined by the *symmetric* square root of the
+covariance matrix $\Sigma$. Note that the stability of the state space model
+is not checked.
+
+
+```{r, echo=FALSE, results='asis'}
+cat("
+\\subsubsection*{Usage}
+\\begin{verbatim}
+SSirf = function(ss, Sigma = NULL, lag.max = 12L, orth = TRUE)
+\\end{verbatim}
+\\subsubsection*{Arguments}
+\\begin{description}
+\\item \\texttt{ss} \\texttt{dse:SS} object, which represents an innovation
+           form state space model.
+\\item \\texttt{Sigma} covariance of the innovations 
+             ($(n\\times n)$ symmetric, positive definite matrix).
+             If \\texttt{NULL} then the $n$-dimensional identity matrix is used.
+\\item \\texttt{lag.max} maximum lag (integer)
+\\item \\texttt{orth} if \\texttt{TRUE} then the orthogonalized impulse response 
+             function is computed.
+\\end{description}
+\\subsubsection*{Value}
+\\begin{description}
+\\item \\texttt{psi} $(n\\times n(l_{\\mbox{max}}+1))$ matrix with the 
+       impulse response coefficients.
+\\item \\texttt{irf} $(nn\\times (l_{\\mbox{max}}+1))$ matrix with the 
+       orthogonalized impulse response coefficients. If \\texttt{!orth} 
+       then \\texttt{irf} is just a 'reshaped' version of \\texttt{psi}.
+       Note that \\texttt{psi} and \\texttt{irf} have different dimensions.
+\\end{description}
+")
+```
+
+
